@@ -45,13 +45,19 @@ public final class ECGParser {
                         meta.device = parts.dropFirst().joined(separator: ", ").replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
                     }
                 }
+                if lower.contains("symptoms") || lower.contains("sintomi") {
+                    let parts = line.components(separatedBy: ",")
+                    if parts.count >= 2 {
+                        let sym = parts.dropFirst().joined(separator: ", ").replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
+                        if !sym.isEmpty { meta.symptoms = sym }
+                    }
+                }
             }
 
-            // Check if line is numeric (voltage sample)
+            // Numeric ECG sample parsing (supports comma decimal and uV values)
             let trimmed = line.replacingOccurrences(of: "\"", with: "")
             let cells = trimmed.components(separatedBy: ",")
             if cells.count == 2, let _ = Int(cells[0]), let _ = Int(cells[1]) {
-                // e.g. -1,25 split across comma
                 if let val = Double("\(cells[0]).\(cells[1])") {
                     samples.append(val / 1000.0) // Convert uV to mV
                     continue
@@ -70,33 +76,86 @@ public final class ECGParser {
 }
 
 public final class ECGProcessor {
-    // 2nd order Butterworth Bandpass (5-15 Hz approximation at 512 Hz)
-    public static func bandpassFilter(signal: [Double], fs: Double) -> [Double] {
-        guard signal.count > 10 else { return signal }
-        // Simple forward-backward difference gradient bandpass
-        let n = signal.count
-        var filtered = [Double](repeating: 0.0, count: n)
-        // Highpass (remove baseline wander)
-        let alpha = 0.995
-        var prevIn = signal[0]
-        var prevOut = 0.0
-        for i in 0..<n {
-            let out = alpha * (prevOut + signal[i] - prevIn)
-            prevIn = signal[i]
-            prevOut = out
-            filtered[i] = out
+
+    // MARK: - Zero-Phase Digital Filtering (filtfilt)
+
+    /// Direct Form II Transposed filtering
+    private static func lfilter(b: [Double], a: [Double], x: [Double]) -> [Double] {
+        guard !x.isEmpty else { return [] }
+        let n = x.count
+        let m = max(b.count, a.count)
+
+        var bNorm = b
+        var aNorm = a
+        if bNorm.count < m { bNorm += [Double](repeating: 0.0, count: m - bNorm.count) }
+        if aNorm.count < m { aNorm += [Double](repeating: 0.0, count: m - aNorm.count) }
+
+        let a0 = aNorm[0]
+        if abs(a0 - 1.0) > 1e-12 && abs(a0) > 1e-12 {
+            bNorm = bNorm.map { $0 / a0 }
+            aNorm = aNorm.map { $0 / a0 }
         }
-        return filtered
+
+        var y = [Double](repeating: 0.0, count: n)
+        var reg = [Double](repeating: 0.0, count: m)
+
+        for i in 0..<n {
+            let xi = x[i]
+            let yi = bNorm[0] * xi + reg[1]
+            y[i] = yi
+            for j in 1..<(m - 1) {
+                reg[j] = bNorm[j] * xi - aNorm[j] * yi + reg[j + 1]
+            }
+            if m > 1 {
+                reg[m - 1] = bNorm[m - 1] * xi - aNorm[m - 1] * yi
+            }
+        }
+        return y
     }
+
+    /// Forward-backward zero-phase filtering (exact equivalent of scipy.signal.filtfilt)
+    public static func filtfilt(b: [Double], a: [Double], x: [Double]) -> [Double] {
+        guard x.count > 15 else { return x }
+        let yFwd = lfilter(b: b, a: a, x: x)
+        let yRev = lfilter(b: b, a: a, x: yFwd.reversed())
+        return yRev.reversed()
+    }
+
+    /// 0.5 Hz High-pass Butterworth filter (removes baseline wander without phase delay)
+    public static func removeBaselineWander(signal: [Double], fs: Double) -> [Double] {
+        // 2nd order Butterworth highpass at 0.5 Hz, fs=512
+        let b = [0.9956706458770602, -1.9913412917541204, 0.9956706458770602]
+        let a = [1.0, -1.99132254835917, 0.9913600351490711]
+        return filtfilt(b: b, a: a, x: signal)
+    }
+
+    /// 35 Hz Low-pass Butterworth filter (removes high frequency EMG noise for clean T-wave delineation)
+    public static func smoothSignal(signal: [Double], fs: Double) -> [Double] {
+        // 2nd order Butterworth lowpass at 35 Hz, fs=512
+        let b = [0.035084902304091566, 0.07016980460818313, 0.035084902304091566]
+        let a = [1.0, -1.4047060034581547, 0.5450456126745209]
+        return filtfilt(b: b, a: a, x: signal)
+    }
+
+    /// 5-15 Hz Band-pass filter (isolates QRS complex energy for Pan-Tompkins)
+    public static func bandpassFilter(signal: [Double], fs: Double) -> [Double] {
+        let b = [0.0034606847613782503, 0.0, -0.0069213695227565005, 0.0, 0.0034606847613782503]
+        let a = [1.0, -3.805214529160545, 5.453022062691062, -3.4883663403144958, 0.8406758500795084]
+        return filtfilt(b: b, a: a, x: signal)
+    }
+
+    // MARK: - QRS & Peak Detection
 
     public static func detectRPeaks(signal: [Double], fs: Double) -> [Int] {
         let n = signal.count
         guard n > Int(fs * 2.0) else { return [] }
 
-        // Pan-Tompkins derivative & squaring
+        let bp = bandpassFilter(signal: signal, fs: fs)
+
+        // Derivative & Squaring
         var deriv = [Double](repeating: 0.0, count: n)
         for i in 1..<(n - 1) {
-            deriv[i] = (signal[i + 1] - signal[i - 1]) * 0.5
+            deriv[i] = (bp[i + 1] - bp[i - 1]) * 0.5
         }
         let squared = deriv.map { $0 * $0 }
 
@@ -106,15 +165,13 @@ public final class ECGProcessor {
         var sum = 0.0
         for i in 0..<n {
             sum += squared[i]
-            if i >= winSize {
-                sum -= squared[i - winSize]
-            }
+            if i >= winSize { sum -= squared[i - winSize] }
             integrated[i] = sum / Double(winSize)
         }
 
         let maxVal = integrated.max() ?? 1.0
-        let threshold = maxVal * 0.25
-        let refractory = Int(0.25 * fs)
+        let threshold = maxVal * 0.22
+        let refractory = Int(0.22 * fs)
 
         var candidatePeaks: [Int] = []
         var lastPeak = -refractory
@@ -128,8 +185,8 @@ public final class ECGProcessor {
             }
         }
 
-        // Snap to true extremum of signal (handles upright and inverted QRS)
-        let half = Int(0.06 * fs)
+        // Snap to true R extremum on baseline-removed signal (+/- 50 ms window)
+        let half = Int(0.05 * fs)
         var refined: [Int] = []
         for p in candidatePeaks {
             let lo = max(0, p - half)
@@ -148,8 +205,74 @@ public final class ECGProcessor {
             }
         }
 
+        // Recover missed beats inside gaps > 1.5x median RR
+        if refined.count >= 4 {
+            var rrs = [Double]()
+            for i in 0..<(refined.count - 1) {
+                rrs.append(Double(refined[i + 1] - refined[i]))
+            }
+            let medRR = rrs.sorted()[rrs.count / 2]
+            var out = refined
+            for i in 0..<(refined.count - 1) {
+                let a_ = refined[i]
+                let b_ = refined[i + 1]
+                let gap = Double(b_ - a_)
+                let nMissing = Int(round(gap / medRR)) - 1
+                if nMissing >= 1 && gap >= 1.5 * medRR {
+                    let step = gap / Double(nMissing + 1)
+                    for m_ in 1...nMissing {
+                        let center = a_ + Int(Double(m_) * step)
+                        let lo = max(a_ + Int(0.25 * medRR), center - Int(0.25 * medRR))
+                        let hi = min(b_ - Int(0.25 * medRR), center + Int(0.25 * medRR))
+                        if hi > lo {
+                            var bestJ = lo
+                            var bestA = 0.0
+                            for j in lo...hi {
+                                if abs(signal[j]) > bestA {
+                                    bestA = abs(signal[j])
+                                    bestJ = j
+                                }
+                            }
+                            out.append(bestJ)
+                        }
+                    }
+                }
+            }
+            refined = Array(Set(out)).sorted()
+        }
+
         return refined
     }
+
+    // MARK: - P-Wave Detection (Phasor Transform)
+
+    public static func detectPWaves(signal: [Double], rPeaks: [Int], fs: Double) -> [Int] {
+        guard !signal.isEmpty && !rPeaks.isEmpty else { return [] }
+        let rv = 0.001 // 1 uV reference scale
+        let phasor = signal.map { atan2($0, rv) }
+        let maxPhasor = phasor.max() ?? 1.0
+        let threshold = maxPhasor * 0.35
+
+        var pPeaks: [Int] = []
+        let refractory = Int(0.15 * fs)
+        var lastP = -refractory
+
+        for i in 1..<(phasor.count - 1) {
+            if phasor[i] > threshold && phasor[i] > phasor[i - 1] && phasor[i] >= phasor[i + 1] {
+                if (i - lastP) > refractory {
+                    // Make sure it is not directly inside a QRS complex
+                    let isNearR = rPeaks.contains { abs($0 - i) < Int(0.06 * fs) }
+                    if !isNearR {
+                        pPeaks.append(i)
+                        lastP = i
+                    }
+                }
+            }
+        }
+        return pPeaks
+    }
+
+    // MARK: - HRV Metrics
 
     public static func calculateHRV(rrMs: [Double]) -> HRVMetrics {
         guard !rrMs.isEmpty else { return HRVMetrics(meanRR: 0, sdnn: 0, rmssd: 0, pnn50: 0) }
@@ -173,6 +296,8 @@ public final class ECGProcessor {
         return HRVMetrics(meanRR: mean, sdnn: sdnn, rmssd: 0, pnn50: 0)
     }
 
+    // MARK: - QTc Formulas
+
     public static func calculateQTc(qtMs: Double, rrMs: Double) -> (bazett: Double, fridericia: Double, framingham: Double, hodges: Double) {
         guard qtMs > 0, rrMs > 0 else { return (0, 0, 0, 0) }
         let rrSec = rrMs / 1000.0
@@ -186,8 +311,13 @@ public final class ECGProcessor {
         return (bazett, fridericia, framingham, hodges)
     }
 
+    // MARK: - QT Tangent Delineation & Ensemble Averaging
+
     public static func analyzeQT(signal: [Double], rPeaks: [Int], fs: Double) -> (summary: QTAnalysisSummary?, medianBeat: MedianBeatData?, beats: [QTBeatResult]) {
         guard rPeaks.count >= 4 else { return (nil, nil, []) }
+
+        // Use zero-phase smoothed signal for repolarization analysis
+        let smoothed = smoothSignal(signal: signal, fs: fs)
 
         var rrSamples: [Double] = []
         for i in 0..<(rPeaks.count - 1) {
@@ -200,14 +330,35 @@ public final class ECGProcessor {
         let pre = Int(0.25 * fs)
         let post = min(Int(0.75 * medRRSamples), Int(0.55 * fs))
 
-        // Template matching to select regular, normal beats
+        // QRS Template Correlation to discard ectopic beats / post-pause outliers
+        let half = Int(0.06 * fs)
+        var templateAccum = [Double](repeating: 0.0, count: 2 * half)
+        var validTemplateCount = 0
+
+        for r in rPeaks {
+            if (r - half) >= 0 && (r + half) < smoothed.count {
+                for j in 0..<(2 * half) {
+                    templateAccum[j] += smoothed[r - half + j]
+                }
+                validTemplateCount += 1
+            }
+        }
+        guard validTemplateCount >= 3 else { return (nil, nil, []) }
+        let template = templateAccum.map { $0 / Double(validTemplateCount) }
+
         var keptBeats: [Int] = []
         for i in 1..<(rPeaks.count - 1) {
             let r = rPeaks[i]
-            if (r - pre) >= 0 && (r + post) < signal.count {
+            if (r - pre) >= 0 && (r + post) < smoothed.count {
                 let rrPrev = Double(rPeaks[i] - rPeaks[i - 1])
                 let rrNext = Double(rPeaks[i + 1] - rPeaks[i])
-                if rrPrev >= 0.8 * medRRSamples && rrPrev <= 1.2 * medRRSamples && rrNext >= 0.8 * medRRSamples {
+                let isRegular = rrPrev >= 0.8 * medRRSamples && rrPrev <= 1.2 * medRRSamples && rrNext >= 0.8 * medRRSamples
+
+                // Correlation check
+                let qrs = Array(smoothed[(r - half)..<(r + half)])
+                let corr = pearsonCorrelation(qrs, template)
+
+                if isRegular && corr >= 0.88 {
                     keptBeats.append(i)
                 }
             }
@@ -221,13 +372,12 @@ public final class ECGProcessor {
             var col = [Double]()
             for bi in keptBeats {
                 let r = rPeaks[bi]
-                col.append(signal[r - pre + s])
+                col.append(smoothed[r - pre + s])
             }
             col.sort()
             medianWave[s] = col[col.count / 2]
         }
 
-        // Delineate on median beat
         guard let medDel = delineateSingleBeat(wave: medianWave, rIdx: pre, fs: fs, rrMs: medRRMs) else {
             return (nil, nil, [])
         }
@@ -260,7 +410,7 @@ public final class ECGProcessor {
         for bi in keptBeats {
             let r = rPeaks[bi]
             let rrPrevMs = (Double(rPeaks[bi] - rPeaks[bi - 1]) / fs) * 1000.0
-            let beatSegment = Array(signal[(r - pre)..<(r + post)])
+            let beatSegment = Array(smoothed[(r - pre)..<(r + post)])
             if let res = delineateSingleBeat(wave: beatSegment, rIdx: pre, fs: fs, rrMs: rrPrevMs) {
                 let beatQtc = calculateQTc(qtMs: res.qtMs, rrMs: rrPrevMs)
                 beatResults.append(QTBeatResult(
@@ -305,6 +455,24 @@ public final class ECGProcessor {
         return (summary, medianBeatData, beatResults)
     }
 
+    private static func pearsonCorrelation(_ x: [Double], _ y: [Double]) -> Double {
+        guard x.count == y.count && !x.isEmpty else { return 0.0 }
+        let mx = x.reduce(0.0, +) / Double(x.count)
+        let my = y.reduce(0.0, +) / Double(y.count)
+        var num = 0.0
+        var dx2 = 0.0
+        var dy2 = 0.0
+        for i in 0..<x.count {
+            let dx = x[i] - mx
+            let dy = y[i] - my
+            num += dx * dy
+            dx2 += dx * dx
+            dy2 += dy * dy
+        }
+        let denom = sqrt(dx2 * dy2)
+        return denom > 1e-12 ? (num / denom) : 0.0
+    }
+
     private struct SingleBeatDelineation {
         let qOn: Int
         let jPt: Int
@@ -323,7 +491,7 @@ public final class ECGProcessor {
         let ms = fs / 1000.0
         guard rIdx >= Int(0.12 * fs), rIdx < (n - 5) else { return nil }
 
-        // Baseline (average of pre-P and post-T levels)
+        // Robust Isoelectric Baseline: blend pre-P and post-T tails
         let preCount = max(3, Int(0.05 * fs))
         let preSub = Array(wave[0..<min(preCount, n)])
         let tailCount = max(3, Int(0.04 * fs))
@@ -336,7 +504,7 @@ public final class ECGProcessor {
             g[i] = (wave[i + 1] - wave[i - 1]) * 0.5
         }
 
-        // QRS slope search
+        // QRS max slope
         let qrsLo = max(0, rIdx - Int(0.04 * fs))
         let qrsHi = min(n - 1, rIdx + Int(0.04 * fs))
         let maxSlope = (qrsLo...qrsHi).map { abs(g[$0]) }.max() ?? 1.0
@@ -378,7 +546,7 @@ public final class ECGProcessor {
         let tHi = min(n - 3, rIdx + Int(min(0.72 * rrMs, 460.0) * ms))
         guard tHi > (tLo + Int(0.04 * fs)) else { return nil }
 
-        // Find T peak
+        // Find prominent T peak (highest deviation from baseline)
         var bestTPeak = tLo
         var maxDev = 0.0
         for i in tLo...tHi {

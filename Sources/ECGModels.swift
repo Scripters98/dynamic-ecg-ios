@@ -6,6 +6,7 @@ public struct ECGMetadata {
     public var sampleRate: Double = 512.0
     public var device: String = "Apple Watch"
     public var lead: String = "Lead I"
+    public var symptoms: String = "Nessuno"
 }
 
 public struct QTBeatResult: Identifiable {
@@ -69,8 +70,10 @@ public struct ECGAnalysisReport {
     public let metadata: ECGMetadata
     public let fs: Double
     public let durationSec: Double
+    public let rawSignal: [Double]
     public let filteredSignal: [Double]
     public let rPeakIndices: [Int]
+    public let pPeakIndices: [Int]
     public let bpm: Double
     public let hrv: HRVMetrics
     public let rrIntervalsMs: [Double]
