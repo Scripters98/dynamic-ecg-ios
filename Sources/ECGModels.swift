@@ -1,5 +1,18 @@
 import Foundation
 
+public enum Gender: String, CaseIterable, Identifiable {
+    case male = "Uomo"
+    case female = "Donna"
+    public var id: String { rawValue }
+}
+
+public enum QTcStatus: String {
+    case normal = "Normale"
+    case borderline = "Borderline"
+    case prolonged = "Prolungato (Attenzione)"
+    case shortened = "Accorciato (< 350 ms)"
+}
+
 public struct ECGMetadata {
     public var recordedDate: String = "N/D"
     public var classification: String = "N/D"
@@ -57,6 +70,34 @@ public struct QTAnalysisSummary {
     public let beatsTotal: Int
     public let beatQtMedian: Double
     public let beatQtIqr: Double
+
+    public func evaluate(for gender: Gender) -> (status: QTcStatus, text: String, isWarning: Bool) {
+        let val = qtcFridericia
+        if val <= 0 {
+            return (.normal, "Calcolo non disponibile", false)
+        }
+        if val < 350.0 {
+            return (.shortened, "QTc Fridericia \(Int(val)) ms < 350 ms (Accorciato)", true)
+        }
+        switch gender {
+        case .male:
+            if val < 450.0 {
+                return (.normal, "QTc Fridericia \(Int(val)) ms nella norma (Uomo < 450 ms)", false)
+            } else if val <= 470.0 {
+                return (.borderline, "QTc Fridericia \(Int(val)) ms Borderline (Uomo 450-470 ms)", true)
+            } else {
+                return (.prolonged, "QTc Fridericia \(Int(val)) ms Prolungato (Uomo > 470 ms)", true)
+            }
+        case .female:
+            if val < 460.0 {
+                return (.normal, "QTc Fridericia \(Int(val)) ms nella norma (Donna < 460 ms)", false)
+            } else if val <= 480.0 {
+                return (.borderline, "QTc Fridericia \(Int(val)) ms Borderline (Donna 460-480 ms)", true)
+            } else {
+                return (.prolonged, "QTc Fridericia \(Int(val)) ms Prolungato (Donna > 480 ms)", true)
+            }
+        }
+    }
 }
 
 public struct HRVMetrics {
@@ -80,4 +121,5 @@ public struct ECGAnalysisReport {
     public let qtSummary: QTAnalysisSummary?
     public let medianBeat: MedianBeatData?
     public let beats: [QTBeatResult]
+    public var userNotes: String = ""
 }
