@@ -64,7 +64,7 @@ struct ContentView: View {
             }
             .fileImporter(
                 isPresented: $isImporting,
-                allowedContentTypes: [.commaSeparatedText, .plainText, .text],
+                allowedContentTypes: [.commaSeparatedText, .plainText, .text, .pdf],
                 allowsMultipleSelection: false
             ) { result in
                 handleFileImport(result: result)
@@ -98,7 +98,7 @@ struct ContentView: View {
             Button {
                 isImporting = true
             } label: {
-                Label("Importa CSV da File", systemImage: "doc.badge.plus")
+                Label("Importa CSV o PDF da File", systemImage: "doc.badge.plus")
             }
 
             Button {
@@ -1185,8 +1185,29 @@ struct ContentView: View {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }
 
+        let ext = url.pathExtension.lowercased()
+        let name = url.deletingPathExtension().lastPathComponent
+
+        if ext == "pdf" {
+            #if canImport(PDFKit)
+            if let (meta, multi, fs) = AppleWatchPDFParser.parsePDF(url: url) {
+                let rep = ECGProcessor.analyze(
+                    multiLead: multi,
+                    metadata: meta,
+                    fs: fs,
+                    selectedLead: .lead1,
+                    userNotes: userNotes
+                )
+                self.fileName = "\(name).pdf"
+                self.report = rep
+                self.generatedPDFURL = nil
+                return
+            }
+            #endif
+        }
+
         if let data = try? Data(contentsOf: url), let content = String(data: data, encoding: .utf8) {
-            analyzeContent(content, name: url.deletingPathExtension().lastPathComponent)
+            analyzeContent(content, name: name)
         }
     }
 
