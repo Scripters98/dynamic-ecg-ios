@@ -11,53 +11,44 @@ struct ContentView: View {
     @State private var selectedGender: Gender = .male
     @State private var userNotes: String = ""
     @State private var isNotesSheetPresented: Bool = false
+    @State private var isArchiveSheetPresented: Bool = false
+    @State private var isSettingsSheetPresented: Bool = false
     @State private var generatedPDFURL: URL?
     @State private var isSharingPDF: Bool = false
-    @State private var useRawSignal: Bool = false
-
+    @State private var timeWindowSec: Double = 10.0
+    @State private var timeOffsetSec: Double = 0.0
+    
+    // 3D VCG rotation states
+    @State private var vcgYaw: Double = 35.0
+    @State private var vcgPitch: Double = -25.0
+    @State private var vcgScale: Double = 1.0
+    @State private var vcgAutoRotate: Bool = false
+    
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    // Header card
                     headerCard
 
                     if let report = report {
-                        // Metadata card with Gender toggle
-                        metadataCard(report: report)
+                        // Multi-lead selector if Holter recording
+                        if report.multiLead.hasMultipleLeads {
+                            leadSelectorCard(report: report)
+                        }
 
                         // Clinical Interpretation Banner
                         clinicalEvaluationCard(report: report)
 
-                        // KPI Grid
+                        // KPI Grid (HR, QTc, PR, SDNN)
                         kpiGrid(report: report)
 
-                        // QT Technical Highlights
-                        qtHighlightCard(report: report)
+                        // Main 6-Tab Segmented Selector
+                        tabSelector
 
-                        // Segmented control
-                        Picker("Visualizzazione", selection: $selectedTab) {
-                            Text("Tracciato").tag(0)
-                            Text("QT Tangente").tag(1)
-                            Text("Battiti").tag(2)
-                            Text("Lorenz").tag(3)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.horizontal, 4)
+                        // Tab Content View
+                        tabContentView(report: report)
 
-                        // Selected tab content
-                        switch selectedTab {
-                        case 0:
-                            continuousEcgStripView(report: report)
-                        case 1:
-                            medianBeatTangentView(report: report)
-                        case 2:
-                            beatTableView(report: report)
-                        default:
-                            lorenzPlotView(report: report)
-                        }
-
-                        // Export PDF Action Button
+                        // PDF Export Section
                         pdfExportSection(report: report)
                     } else {
                         emptyStateView
@@ -68,607 +59,1096 @@ struct ContentView: View {
             .navigationTitle("Dynamic ECG")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            isImporting = true
-                        } label: {
-                            Label("Apri CSV da File", systemImage: "doc.badge.plus")
-                        }
-
-                        Button {
-                            isNotesSheetPresented = true
-                        } label: {
-                            Label("Aggiungi Note Cliniche", systemImage: "pencil.and.list.clipboard")
-                        }
-
-                        Divider()
-
-                        Menu("Carica Tracciato di Esempio") {
-                            Button("Tracciato Sinusale 1 (70 bpm)") {
-                                loadSample(named: "Sinusale_1", hr: 70, qt: 354)
-                            }
-                            Button("Tracciato Sinusale 2 (92 bpm)") {
-                                loadSample(named: "Sinusale_2", hr: 92, qt: 324)
-                            }
-                            Button("Frequenza Elevata (113 bpm)") {
-                                loadSample(named: "Elevata_113bpm", hr: 113, qt: 291)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3)
-                    }
+                    toolbarMenu
                 }
             }
             .fileImporter(
                 isPresented: $isImporting,
-                allowedContentTypes: [.commaSeparatedText, .text, .plainText, .data],
+                allowedContentTypes: [.commaSeparatedText, .plainText, .text],
                 allowsMultipleSelection: false
             ) { result in
                 handleFileImport(result: result)
             }
             .sheet(isPresented: $isNotesSheetPresented) {
-                notesInputSheet
+                notesSheet
+            }
+            .sheet(isPresented: $isArchiveSheetPresented) {
+                archiveSheet
+            }
+            .sheet(isPresented: $isSettingsSheetPresented) {
+                settingsSheet
+            }
+            .sheet(isPresented: $isSharingPDF) {
+                if let url = generatedPDFURL {
+                    ShareSheet(activityItems: [url])
+                }
             }
             .onAppear {
                 if report == nil {
-                    loadSample(named: "Sinusale_1", hr: 70, qt: 354)
+                    loadClinicalSample(PreloadedSamples.allSamples[0])
                 }
             }
         }
     }
 
-    // MARK: - Header & Metadata
+    // MARK: - Toolbar Menu
 
-    private var headerCard: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Tracciato Apple Watch")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(fileName)
-                    .font(.headline)
-                    .lineLimit(1)
-            }
-            Spacer()
+    private var toolbarMenu: some View {
+        Menu {
             Button {
                 isImporting = true
             } label: {
-                Label("Sfoglia", systemImage: "folder")
-                    .font(.subheadline.bold())
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .clipShape(Capsule())
+                Label("Importa CSV da File", systemImage: "doc.badge.plus")
+            }
+
+            Button {
+                isArchiveSheetPresented = true
+            } label: {
+                Label("Archivio & Casi Clinici", systemImage: "folder")
+            }
+
+            Button {
+                isNotesSheetPresented = true
+            } label: {
+                Label("Note Cliniche", systemImage: "pencil.and.list.clipboard")
+            }
+
+            Button {
+                isSettingsSheetPresented = true
+            } label: {
+                Label("Parametri & Calibrazione", systemImage: "slider.horizontal.3")
+            }
+
+            Divider()
+
+            Menu("Casi Clinici di Riferimento") {
+                ForEach(PreloadedSamples.allSamples, id: \.id) { sample in
+                    Button(sample.title) {
+                        loadClinicalSample(sample)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.title3)
+        }
+    }
+
+    // MARK: - Header Card
+
+    private var headerCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "waveform.path.ecg.rectangle")
+                    .font(.title2)
+                    .foregroundColor(.cyan)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fileName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if let report = report {
+                        Text("\(report.metadata.device) • \(String(format: "%.0f Hz", report.fs)) • \(String(format: "%.1f s", report.durationSec))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+                if let report = report {
+                    Text(report.selectedLead.rawValue)
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.cyan.opacity(0.15))
+                        .foregroundColor(.cyan)
+                        .cornerRadius(6)
+                }
             }
         }
         .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
 
-    private func metadataCard(report: ECGAnalysisReport) -> some View {
-        VStack(spacing: 8) {
-            HStack {
-                Label(report.metadata.recordedDate, systemImage: "calendar")
-                Spacer()
-                Label(report.metadata.device, systemImage: "applewatch")
-            }
-            Divider()
-            HStack {
-                Label(report.metadata.classification, systemImage: "waveform.path.ecg")
-                    .foregroundStyle(report.metadata.classification.lowercased().contains("elevata") ? .orange : .green)
-                Spacer()
-                Text("\(String(format: "%.1f Hz", report.fs)) • \(String(format: "%.0f s", report.durationSec))")
-                    .foregroundStyle(.secondary)
-            }
-            Divider()
-            HStack {
-                Text("Genere per intervalli QTc:")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Picker("Genere", selection: $selectedGender) {
-                    ForEach(Gender.allCases) { g in
-                        Text(g.rawValue).tag(g)
-                    }
+    // MARK: - Lead Selector Card
+
+    private func leadSelectorCard(report: ECGAnalysisReport) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Derivazione Attiva (Registrazione Multi-Canale):")
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+            Picker("Derivazione", selection: Binding(
+                get: { report.selectedLead },
+                set: { newLead in switchLead(to: newLead) }
+            )) {
+                ForEach(LeadSelection.allCases) { lead in
+                    Text(lead.rawValue).tag(lead)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 150)
             }
+            .pickerStyle(.segmented)
         }
-        .font(.caption)
-        .padding(12)
-        .background(Color.gray.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
 
     // MARK: - Clinical Evaluation Card
 
+    private func clinicalEvaluationCard(report: ECGAnalysisReport) -> some View {
+        let (status, text, isWarn) = report.qtSummary?.evaluate(for: selectedGender) ?? (.normal, "Calcolo non disponibile", false)
+        let evalColor = statusColor(for: status)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: isWarn ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                    .foregroundColor(evalColor)
+                    .font(.title3)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.rawValue)
+                        .font(.headline)
+                        .foregroundColor(evalColor)
+                    Text(text)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Text(selectedGender.rawValue)
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.gray.opacity(0.15))
+                    .cornerRadius(6)
+            }
+
+            if let qt = report.qtSummary {
+                HStack(spacing: 12) {
+                    Label(qt.isReliable ? "Affidabile (IQR < 30 ms)" : "Variabilità battiti elevata", systemImage: qt.isReliable ? "shield.checkmark" : "shield.slash")
+                        .font(.caption2)
+                        .foregroundColor(qt.isReliable ? .green : .orange)
+                    Spacer()
+                    Text("Battiti analizzati: \(qt.beatsAnalyzed)/\(qt.beatsTotal)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding()
+        .background(evalColor.opacity(0.12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(evalColor.opacity(0.35), lineWidth: 1)
+        )
+        .cornerRadius(12)
+    }
+
     private func statusColor(for status: QTcStatus) -> Color {
         switch status {
         case .normal: return .green
-        case .borderline: return .orange
-        case .prolonged, .shortened: return .red
+        case .borderline: return .yellow
+        case .prolonged: return .red
+        case .shortened: return .orange
         }
     }
 
-    @ViewBuilder
-    private func clinicalEvaluationCard(report: ECGAnalysisReport) -> some View {
-        if let s = report.qtSummary {
-            let eval = s.evaluate(for: selectedGender)
-            let color = statusColor(for: eval.status)
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Image(systemName: eval.isWarning ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                        .foregroundStyle(color)
-                    Text("Valutazione Clinica QTc: \(eval.status.rawValue.uppercased())")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(color)
-                    Spacer()
-                    Text("Linee Guida AHA")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Text(eval.text)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-
-                HStack(spacing: 12) {
-                    Text("Normale: < \(selectedGender == .male ? "450" : "460") ms")
-                    Text("Borderline: \(selectedGender == .male ? "450-470" : "460-480") ms")
-                    Text("Prolungato: > \(selectedGender == .male ? "470" : "480") ms")
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            .padding()
-            .background(color.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(color.opacity(0.4), lineWidth: 1)
-            )
-        }
-    }
+    // MARK: - KPI Grid
 
     private func kpiGrid(report: ECGAnalysisReport) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-            kpiTile(title: "Frequenza", value: "\(String(format: "%.0f", report.bpm)) BPM", color: .red)
-            kpiTile(title: "Picchi R", value: "\(report.rPeakIndices.count)", color: .blue)
-            kpiTile(title: "RR Medio", value: "\(String(format: "%.0f", report.hrv.meanRR)) ms", color: .orange)
-            kpiTile(title: "SDNN (HRV)", value: "\(String(format: "%.1f", report.hrv.sdnn)) ms", color: .purple)
-            kpiTile(title: "RMSSD", value: "\(String(format: "%.1f", report.hrv.rmssd)) ms", color: .teal)
-            kpiTile(title: "pNN50", value: "\(String(format: "%.1f%%", report.hrv.pnn50))", color: .green)
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            kpiTile(title: "Frequenza Media", value: "\(Int(round(report.bpm))) bpm", icon: "heart.fill", color: .red)
+            kpiTile(title: "QTc Fridericia", value: report.qtSummary != nil ? "\(Int(round(report.qtSummary!.qtcFridericia))) ms" : "N/D", icon: "timer", color: .cyan)
+            kpiTile(title: "Intervallo PR", value: report.phasorData.meanPRMs > 0 ? "\(Int(round(report.phasorData.meanPRMs))) ms" : "N/D", icon: "wave.3.forward", color: .green)
+            kpiTile(title: "Variabilità (SDNN)", value: "\(Int(round(report.hrv.sdnn))) ms", icon: "chart.xyaxis.line", color: .purple)
         }
     }
 
-    private func kpiTile(title: String, value: String, color: Color) -> some View {
-        VStack(spacing: 2) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.bold())
-                .foregroundStyle(color)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func qtHighlightCard(report: ECGAnalysisReport) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func kpiTile(title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Intervalli di Ripolarizzazione")
-                    .font(.footnote.bold())
-                Spacer()
-                if let s = report.qtSummary {
-                    Text(s.isReliable ? "✅ Alta Affidabilità" : "⚠️ Dispersione / Rumore")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(s.isReliable ? Color.green.opacity(0.2) : Color.orange.opacity(0.2))
-                        .foregroundStyle(s.isReliable ? .green : .orange)
-                        .clipShape(Capsule())
-                }
-            }
-
-            if let s = report.qtSummary {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading) {
-                        Text("QT Mediano")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("\(String(format: "%.0f", s.qtMs)) ms")
-                            .font(.title2.bold())
-                    }
-                    Spacer()
-                    VStack(alignment: .leading) {
-                        Text("QTc Fridericia")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("\(String(format: "%.0f", s.qtcFridericia)) ms")
-                            .font(.title2.bold())
-                            .foregroundStyle(.blue)
-                    }
-                    Spacer()
-                    VStack(alignment: .leading) {
-                        Text("QTc Bazett")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("\(String(format: "%.0f", s.qtcBazett)) ms")
-                            .font(.title2.bold())
-                            .foregroundStyle(.purple)
-                    }
-                }
-
-                HStack {
-                    Text("Framingham: \(String(format: "%.0f ms", s.qtcFramingham))")
-                    Spacer()
-                    Text("Hodges: \(String(format: "%.0f ms", s.qtcHodges))")
-                    Spacer()
-                    Text("QRS: \(String(format: "%.0f ms", s.qrsMs))")
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            } else {
-                Text("Morfologia dell'onda T non sufficientemente chiara per il calcolo automatico del QT.")
+                Image(systemName: icon)
+                    .foregroundColor(color)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
             }
+            Text(value)
+                .font(.title3.bold())
+                .foregroundColor(.primary)
         }
-        .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(10)
     }
 
-    // MARK: - 30-Second Continuous Strip with Medical Grid
+    // MARK: - Tab Selector
+
+    private var tabSelector: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                tabButton(title: "Tracciato", index: 0, icon: "waveform.path.ecg")
+                tabButton(title: "Onde P & Fasore", index: 1, icon: "bolt.horizontal")
+                tabButton(title: "Variabilità & Lorenz", index: 2, icon: "point.3.filled.connected.triangle.path")
+                tabButton(title: "Spettrogramma", index: 3, icon: "chart.bar.xaxis")
+                tabButton(title: "QT & Mediano", index: 4, icon: "cross.case")
+                tabButton(title: "Loop 3D / VCG", index: 5, icon: "cube")
+            }
+            .padding(.horizontal, 2)
+        }
+    }
+
+    private func tabButton(title: String, index: Int, icon: String) -> some View {
+        Button {
+            selectedTab = index
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(.caption.bold())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(selectedTab == index ? Color.cyan : Color(.secondarySystemBackground))
+            .foregroundColor(selectedTab == index ? .black : .primary)
+            .cornerRadius(8)
+        }
+    }
+
+    // MARK: - Tab Content View
+
+    @ViewBuilder
+    private func tabContentView(report: ECGAnalysisReport) -> some View {
+        switch selectedTab {
+        case 0:
+            continuousEcgStripView(report: report)
+        case 1:
+            phasorAndPWaveView(report: report)
+        case 2:
+            lorenzAndTachogramView(report: report)
+        case 3:
+            spectrogramAndPanTompkinsView(report: report)
+        case 4:
+            medianBeatTangentView(report: report)
+        default:
+            vcg3DView(report: report)
+        }
+    }
+
+    // MARK: - Tab 0: Continuous Calibrated Strip
 
     private func continuousEcgStripView(report: ECGAnalysisReport) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Tracciato Continuo (30 s)")
-                    .font(.subheadline.bold())
+                Text("Striscia Elettrocardiografica Calibrata")
+                    .font(.headline)
                 Spacer()
-                Text("Scorri orizzontalmente ➔")
+                Text("Scala: \(Int(25 * speedScale)) mm/s · \(Int(10 * voltageScale)) mm/mV")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
             }
 
-            // Controls for scaling & filter toggle
-            HStack {
-                Picker("Scala", selection: $speedScale) {
-                    Text("25 mm/s").tag(1.0)
-                    Text("50 mm/s").tag(2.0)
+            // Window zoom / time position slider
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Finestra: \(String(format: "%.1f", timeOffsetSec))s - \(String(format: "%.1f", min(report.durationSec, timeOffsetSec + timeWindowSec)))s")
+                        .font(.caption2.bold())
+                    Spacer()
+                    Text("Totale: \(String(format: "%.0f", report.durationSec))s")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 140)
-
-                Spacer()
-
-                Toggle("Grezzo", isOn: $useRawSignal)
-                    .font(.caption2)
-                    .toggleStyle(.button)
-                    .tint(.orange)
+                Slider(value: $timeOffsetSec, in: 0...max(0, report.durationSec - timeWindowSec), step: 0.5)
             }
 
-            let sig = useRawSignal ? report.rawSignal : report.filteredSignal
+            // Calibrated Strip Canvas
+            calibratedStripCanvas(report: report)
+                .frame(height: 220)
+                .cornerRadius(8)
+
+            // Legend
+            HStack(spacing: 16) {
+                HStack(spacing: 4) {
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Text("Picchi R (Pan-Tompkins)").font(.caption2)
+                }
+                HStack(spacing: 4) {
+                    Circle().fill(Color.green).frame(width: 8, height: 8)
+                    Text("Onde P (Fasore)").font(.caption2)
+                }
+            }
+            .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+    }
+
+    private func calibratedStripCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
             let fs = report.fs
-            let totalSec = report.durationSec
-            let pointsPerSecond = 100.0 * speedScale
-            let totalWidth = max(350.0, totalSec * pointsPerSecond)
+            let sig = report.filteredSignal
+            let startIdx = Int(timeOffsetSec * fs)
+            let windowCount = Int(timeWindowSec * fs)
+            let endIdx = min(sig.count, startIdx + windowCount)
+            guard endIdx > startIdx else { return }
 
-            ScrollView(.horizontal, showsIndicators: true) {
-                Canvas { context, size in
-                    // 1. Draw Medical ECG Grid
-                    let secWidth = pointsPerSecond
-                    let smallBoxW = secWidth * 0.04
-                    let largeBoxW = secWidth * 0.20
-                    let boxH = 20.0 * voltageScale
+            // Pink medical grid background
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 1.0, green: 0.95, blue: 0.95)))
 
-                    context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.04, green: 0.06, blue: 0.11)))
+            // Medical grid lines
+            let secWidth = size.width / CGFloat(timeWindowSec)
+            let smallBoxW = secWidth * 0.04
+            let largeBoxW = secWidth * 0.20
+            let boxH: CGFloat = 16.0
 
-                    var x = 0.0
-                    while x < size.width {
-                        context.stroke(Path { p in
-                            p.move(to: CGPoint(x: x, y: 0))
-                            p.addLine(to: CGPoint(x: x, y: size.height))
-                        }, with: .color(Color.red.opacity(0.08)), lineWidth: 0.5)
-                        x += smallBoxW
-                    }
-
-                    x = 0.0
-                    while x < size.width {
-                        context.stroke(Path { p in
-                            p.move(to: CGPoint(x: x, y: 0))
-                            p.addLine(to: CGPoint(x: x, y: size.height))
-                        }, with: .color(Color.red.opacity(0.25)), lineWidth: 1.0)
-                        x += largeBoxW
-                    }
-
-                    var y = 0.0
-                    while y < size.height {
-                        context.stroke(Path { p in
-                            p.move(to: CGPoint(x: 0, y: y))
-                            p.addLine(to: CGPoint(x: size.width, y: y))
-                        }, with: .color(Color.red.opacity(0.12)), lineWidth: 0.5)
-                        y += boxH
-                    }
-
-                    let midY = size.height / 2.0
-                    context.stroke(Path { p in
-                        p.move(to: CGPoint(x: 0, y: midY))
-                        p.addLine(to: CGPoint(x: size.width, y: midY))
-                    }, with: .color(Color.red.opacity(0.4)), lineWidth: 1.2)
-
-                    // 2. Waveform
-                    guard sig.count > 1 else { return }
-                    let mvScale = 100.0 * voltageScale
-
-                    var wavePath = Path()
-                    for i in 0..<sig.count {
-                        let curSec = Double(i) / fs
-                        let px = curSec * pointsPerSecond
-                        let py = midY - CGFloat(sig[i] * mvScale)
-                        if i == 0 { wavePath.move(to: CGPoint(x: px, y: py)) } else { wavePath.addLine(to: CGPoint(x: px, y: py)) }
-                    }
-                    context.stroke(wavePath, with: .color(useRawSignal ? .orange : .cyan), lineWidth: 1.4)
-
-                    // 3. R peak markers
-                    for r in report.rPeakIndices where r < sig.count {
-                        let rx = (Double(r) / fs) * pointsPerSecond
-                        let ry = midY - CGFloat(sig[r] * mvScale)
-                        context.stroke(Path { p in
-                            p.move(to: CGPoint(x: rx - 4, y: ry - 4))
-                            p.addLine(to: CGPoint(x: rx + 4, y: ry + 4))
-                            p.move(to: CGPoint(x: rx - 4, y: ry + 4))
-                            p.addLine(to: CGPoint(x: rx + 4, y: ry - 4))
-                        }, with: .color(.red), lineWidth: 2.0)
-                    }
-
-                    // 4. P peaks
-                    for pIdx in report.pPeakIndices where pIdx < sig.count {
-                        let px = (Double(pIdx) / fs) * pointsPerSecond
-                        let py = midY - CGFloat(sig[pIdx] * mvScale)
-                        context.fill(Path(ellipseIn: CGRect(x: px - 2.5, y: py - 2.5, width: 5, height: 5)), with: .color(.green))
-                    }
-                }
-                .frame(width: totalWidth, height: 260)
+            // Small vertical lines
+            var gx: CGFloat = 0
+            while gx <= size.width {
+                var p = Path()
+                p.move(to: CGPoint(x: gx, y: 0))
+                p.addLine(to: CGPoint(x: gx, y: size.height))
+                context.stroke(p, with: .color(Color(red: 1.0, green: 0.80, blue: 0.80, opacity: 0.5)), lineWidth: 0.5)
+                gx += smallBoxW
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            HStack {
-                Label("Griglia clinica: 1 mm = 40 ms / 0.1 mV", systemImage: "grid")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            // Large vertical lines
+            gx = 0
+            while gx <= size.width {
+                var p = Path()
+                p.move(to: CGPoint(x: gx, y: 0))
+                p.addLine(to: CGPoint(x: gx, y: size.height))
+                context.stroke(p, with: .color(Color(red: 0.95, green: 0.60, blue: 0.60, opacity: 0.8)), lineWidth: 1.0)
+                gx += largeBoxW
+            }
+
+            // Horizontal lines
+            var gy: CGFloat = 0
+            while gy <= size.height {
+                var p = Path()
+                p.move(to: CGPoint(x: 0, y: gy))
+                p.addLine(to: CGPoint(x: size.width, y: gy))
+                context.stroke(p, with: .color(Color(red: 1.0, green: 0.80, blue: 0.80, opacity: 0.5)), lineWidth: 0.5)
+                gy += boxH
+            }
+
+            let midY = size.height / 2.0
+            let yGain: CGFloat = 70.0 * CGFloat(voltageScale)
+
+            // ECG Signal Trace
+            var sigPath = Path()
+            for i in startIdx..<endIdx {
+                let relSec = Double(i - startIdx) / fs
+                let px = CGFloat(relSec) * secWidth
+                let py = midY - CGFloat(sig[i]) * yGain
+                if i == startIdx { sigPath.move(to: CGPoint(x: px, y: py)) } else { sigPath.addLine(to: CGPoint(x: px, y: py)) }
+            }
+            context.stroke(sigPath, with: .color(.black), lineWidth: 1.3)
+
+            // R-Peaks (Red circles)
+            for r in report.rPeakIndices where r >= startIdx && r < endIdx {
+                let rx = CGFloat(Double(r - startIdx) / fs) * secWidth
+                let ry = midY - CGFloat(sig[r]) * yGain
+                context.fill(Path(ellipseIn: CGRect(x: rx - 3, y: ry - 3, width: 6, height: 6)), with: .color(.red))
+            }
+
+            // P-Peaks (Green circles)
+            for p in report.phasorData.pPeaks where p >= startIdx && p < endIdx {
+                let px = CGFloat(Double(p - startIdx) / fs) * secWidth
+                let py = midY - CGFloat(sig[p]) * yGain
+                context.fill(Path(ellipseIn: CGRect(x: px - 2.5, y: py - 2.5, width: 5, height: 5)), with: .color(.green))
+            }
+        }
+    }
+
+    // MARK: - Tab 1: P-Waves & Phasor Transform
+
+    private func phasorAndPWaveView(report: ECGAnalysisReport) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Analisi Onde P & Trasformata Fasoriale")
+                .font(.headline)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Intervallo PR Medio")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("\(Int(round(report.phasorData.meanPRMs))) ms")
+                        .font(.title3.bold())
+                }
                 Spacer()
-                Text(useRawSignal ? "Segnale Grezzo (uV/1000)" : "Fase-Zero filtfilt")
-                    .font(.caption2.bold())
-                    .foregroundStyle(useRawSignal ? .orange : .blue)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Stato Conduzione AV")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(report.phasorData.prStatus)
+                        .font(.caption.bold())
+                        .foregroundColor(report.phasorData.meanPRMs > 200 ? .orange : .green)
+                }
+            }
+            .padding(10)
+            .background(Color(.tertiarySystemBackground))
+            .cornerRadius(8)
+
+            // Phasor canvas
+            phasorCanvas(report: report)
+                .frame(height: 200)
+                .background(Color.black.opacity(0.85))
+                .cornerRadius(8)
+
+            HStack(spacing: 16) {
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 1).fill(Color.cyan).frame(width: 14, height: 2)
+                    Text("ECG Filtrato").font(.caption2)
+                }
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 1).fill(Color.purple).frame(width: 14, height: 2)
+                    Text("Segnale Fasoriale atan2(x, rv)").font(.caption2)
+                }
+                HStack(spacing: 4) {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("Onde P rilevate").font(.caption2)
+                }
+            }
+            .foregroundColor(.secondary)
+
+            Text("💡 La Trasformata Fasoriale enfatizza le variazioni lente di potenziale come le onde P atriali rispetto al fondo iso-elettrico, permettendo la stima accurata della conduzione atrio-ventricolare (PR).")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+    }
+
+    private func phasorCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let fs = report.fs
+            let sig = report.filteredSignal
+            let ph = report.phasorData.phasor
+            let startIdx = Int(timeOffsetSec * fs)
+            let windowCount = Int(min(5.0, timeWindowSec) * fs) // 5s zoom for phasor clarity
+            let endIdx = min(sig.count, startIdx + windowCount)
+            guard endIdx > startIdx && !ph.isEmpty else { return }
+
+            let dx = size.width / CGFloat(windowCount)
+            let midY = size.height / 2.0
+
+            // Grid lines
+            var gridPath = Path()
+            for x in stride(from: 0, to: size.width, by: 40) {
+                gridPath.move(to: CGPoint(x: x, y: 0))
+                gridPath.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            context.stroke(gridPath, with: .color(Color.white.opacity(0.1)), lineWidth: 0.5)
+
+            // ECG Trace (Cyan)
+            var sigPath = Path()
+            for i in startIdx..<endIdx {
+                let px = CGFloat(i - startIdx) * dx
+                let py = midY - CGFloat(sig[i]) * 60.0
+                if i == startIdx { sigPath.move(to: CGPoint(x: px, y: py)) } else { sigPath.addLine(to: CGPoint(x: px, y: py)) }
+            }
+            context.stroke(sigPath, with: .color(.cyan), lineWidth: 1.2)
+
+            // Phasor Trace (Purple)
+            var phPath = Path()
+            for i in startIdx..<endIdx {
+                let px = CGFloat(i - startIdx) * dx
+                let py = midY - CGFloat(ph[i]) * 25.0
+                if i == startIdx { phPath.move(to: CGPoint(x: px, y: py)) } else { phPath.addLine(to: CGPoint(x: px, y: py)) }
+            }
+            context.stroke(phPath, with: .color(.purple), style: StrokeStyle(lineWidth: 1.0, dash: [4, 3]))
+
+            // P peaks
+            for p in report.phasorData.pPeaks where p >= startIdx && p < endIdx {
+                let px = CGFloat(p - startIdx) * dx
+                let py = midY - CGFloat(sig[p]) * 60.0
+                context.fill(Path(ellipseIn: CGRect(x: px - 3, y: ry(for: py), width: 6, height: 6)), with: .color(.green))
+            }
+        }
+    }
+
+    private func ry(for val: CGFloat) -> CGFloat {
+        return val - 3
+    }
+
+    // MARK: - Tab 2: Lorenz Plot & Tachogram
+
+    private func lorenzAndTachogramView(report: ECGAnalysisReport) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Grafico di Lorenz (Poincaré) & Tachogramma RR")
+                .font(.headline)
+
+            HStack(spacing: 8) {
+                lorenzPlotCanvas(report: report)
+                    .frame(height: 190)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(8)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    statRow(label: "Corr. ρ", value: String(format: "%.2f", report.hrv.correlationRho))
+                    statRow(label: "SD1 (rapida)", value: "\(Int(round(report.hrv.sd1))) ms")
+                    statRow(label: "SD2 (lunga)", value: "\(Int(round(report.hrv.sd2))) ms")
+                    statRow(label: "SD1 / SD2", value: String(format: "%.2f", report.hrv.sd1Sd2Ratio))
+                    statRow(label: "RMSSD", value: "\(Int(round(report.hrv.rmssd))) ms")
+                    statRow(label: "pNN50", value: String(format: "%.1f%%", report.hrv.pnn50))
+                }
+                .padding(8)
+                .background(Color(.tertiarySystemBackground))
+                .cornerRadius(8)
+            }
+
+            // Continuous Tachogram Curve
+            Text("Tachogramma Temporale (RR & BPM Istantanei)")
+                .font(.subheadline.bold())
+
+            tachogramCanvas(report: report)
+                .frame(height: 150)
+                .background(Color.black.opacity(0.85))
+                .cornerRadius(8)
+
+            // Beat Table excerpt
+            Text("Ultimi Battiti Registrati:")
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+
+            VStack(spacing: 4) {
+                ForEach(report.beats.prefix(5)) { b in
+                    HStack {
+                        Text("Battito #\(b.beatNumber)")
+                            .font(.caption2.bold())
+                        Spacer()
+                        Text("RR: \(Int(round(b.rrMs))) ms")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("QT: \(Int(round(b.qtMs))) ms")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("QTc: \(Int(round(b.qtcFridericia))) ms")
+                            .font(.caption2.bold())
+                            .foregroundColor(.cyan)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(.tertiarySystemBackground))
+                    .cornerRadius(4)
+                }
             }
         }
         .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
 
-    // MARK: - Median Beat & Tangent Method
+    private func statRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label).font(.caption2).foregroundColor(.secondary)
+            Spacer()
+            Text(value).font(.caption2.bold())
+        }
+    }
+
+    private func lorenzPlotCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let rrs = report.tachogram.rrIntervalsMs
+            guard rrs.count > 1 else { return }
+
+            let minRR = max(300.0, (rrs.min() ?? 600.0) - 100.0)
+            let maxRR = min(1600.0, (rrs.max() ?? 1000.0) + 100.0)
+            let span = max(100.0, maxRR - minRR)
+
+            // Identity line y = x (Red dashed)
+            var idLine = Path()
+            idLine.move(to: CGPoint(x: 0, y: size.height))
+            idLine.addLine(to: CGPoint(x: size.width, y: 0))
+            context.stroke(idLine, with: .color(.red.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+            // Points
+            for i in 0..<(rrs.count - 1) {
+                let xNorm = CGFloat((rrs[i] - minRR) / span)
+                let yNorm = CGFloat((rrs[i + 1] - minRR) / span)
+                let px = xNorm * size.width
+                let py = size.height - (yNorm * size.height)
+                context.fill(Path(ellipseIn: CGRect(x: px - 3, y: py - 3, width: 6, height: 6)), with: .color(.cyan))
+            }
+        }
+    }
+
+    private func tachogramCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let rrs = report.tachogram.rrIntervalsMs
+            let times = report.tachogram.beatTimesSec
+            guard rrs.count > 1 else { return }
+
+            let minRR = max(300.0, (rrs.min() ?? 600.0) - 50.0)
+            let maxRR = (rrs.max() ?? 1000.0) + 50.0
+            let span = max(100.0, maxRR - minRR)
+            let totalT = max(1.0, times.last ?? 30.0)
+
+            var path = Path()
+            for i in 0..<rrs.count {
+                let px = CGFloat(times[i] / totalT) * size.width
+                let py = size.height - CGFloat((rrs[i] - minRR) / span) * size.height
+                if i == 0 { path.move(to: CGPoint(x: px, y: py)) } else { path.addLine(to: CGPoint(x: px, y: py)) }
+                context.fill(Path(ellipseIn: CGRect(x: px - 2, y: py - 2, width: 4, height: 4)), with: .color(.cyan))
+            }
+            context.stroke(path, with: .color(.cyan), lineWidth: 1.5)
+        }
+    }
+
+    // MARK: - Tab 3: Spectrogram & Pan-Tompkins Window
+
+    private func spectrogramAndPanTompkinsView(report: ECGAnalysisReport) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Spettrogramma Tempo-Frequenza (0 - 50 Hz)")
+                .font(.headline)
+
+            // Heatmap Canvas
+            spectrogramCanvas(report: report)
+                .frame(height: 180)
+                .cornerRadius(8)
+
+            HStack {
+                Text("0 Hz (DC / Linea Base)").font(.caption2).foregroundColor(.secondary)
+                Spacer()
+                Text("50 Hz (Banda QRS / Rumore)").font(.caption2).foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            Text("Energia Integrata Pan-Tompkins (Finestra di Convoluzione)")
+                .font(.headline)
+
+            panTompkinsCanvas(report: report)
+                .frame(height: 120)
+                .background(Color.black.opacity(0.85))
+                .cornerRadius(8)
+
+            Text("💡 La finestra integrata di Pan-Tompkins combina derivata e quadratura per isolare le raffiche energetiche dei complessi QRS, superando il rumore e le onde T prominenti.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+    }
+
+    private func spectrogramCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let spec = report.spectrogramData
+            let numF = spec.freqBins.count
+            let numT = spec.timeBins.count
+            guard numF > 1 && numT > 1 else { return }
+
+            let minDb = spec.minDb
+            let maxDb = spec.maxDb
+            let span = max(1.0, maxDb - minDb)
+
+            let dx = size.width / CGFloat(numT)
+            let dy = size.height / CGFloat(numF)
+
+            for f in 0..<numF {
+                for t in 0..<numT {
+                    let val = spec.matrix[f][t]
+                    let norm = (val - minDb) / span
+                    let color = spectrogramColormap(norm: norm)
+                    let rect = CGRect(
+                        x: CGFloat(t) * dx,
+                        y: size.height - CGFloat(f + 1) * dy,
+                        width: dx + 0.5,
+                        height: dy + 0.5
+                    )
+                    context.fill(Path(rect), with: .color(color))
+                }
+            }
+        }
+    }
+
+    private func spectrogramColormap(norm: Double) -> Color {
+        let v = max(0.0, min(1.0, norm))
+        if v < 0.25 {
+            return Color(red: 0, green: v * 4.0 * 0.8, blue: 0.5 + v * 2.0)
+        } else if v < 0.5 {
+            return Color(red: 0, green: 0.8 + (v - 0.25) * 0.8, blue: 1.0 - (v - 0.25) * 4.0)
+        } else if v < 0.75 {
+            return Color(red: (v - 0.5) * 4.0, green: 1.0, blue: 0)
+        } else {
+            return Color(red: 1.0, green: 1.0 - (v - 0.75) * 4.0, blue: 0)
+        }
+    }
+
+    private func panTompkinsCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let win = report.panTompkinsData.windowSignal
+            let fs = report.fs
+            let startIdx = Int(timeOffsetSec * fs)
+            let windowCount = Int(timeWindowSec * fs)
+            let endIdx = min(win.count, startIdx + windowCount)
+            guard endIdx > startIdx else { return }
+
+            let maxVal = win.max() ?? 1.0
+            let dx = size.width / CGFloat(windowCount)
+
+            var path = Path()
+            for i in startIdx..<endIdx {
+                let px = CGFloat(i - startIdx) * dx
+                let py = size.height - CGFloat(win[i] / maxVal) * (size.height - 10)
+                if i == startIdx { path.move(to: CGPoint(x: px, y: py)) } else { path.addLine(to: CGPoint(x: px, y: py)) }
+            }
+            context.stroke(path, with: .color(.purple), lineWidth: 1.5)
+
+            // Threshold line (Red dashed)
+            let thY = size.height - CGFloat(report.panTompkinsData.threshold / maxVal) * (size.height - 10)
+            var thPath = Path()
+            thPath.move(to: CGPoint(x: 0, y: thY))
+            thPath.addLine(to: CGPoint(x: size.width, y: thY))
+            context.stroke(thPath, with: .color(.red.opacity(0.7)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+        }
+    }
+
+    // MARK: - Tab 4: Median Beat & Tangent Method
 
     private func medianBeatTangentView(report: ECGAnalysisReport) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Battito Mediano e Metodo della Tangente")
-                    .font(.subheadline.bold())
-                Spacer()
-                if let mb = report.medianBeat {
-                    Text("QT = \(String(format: "%.0f ms", mb.qtMs))")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.yellow)
-                }
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Battito Mediano d'Insieme & Metodo della Tangente AHA")
+                .font(.headline)
 
             if let mb = report.medianBeat {
-                Canvas { context, size in
-                    let w = mb.wave
-                    guard w.count > 10 else { return }
-                    let minVal = w.min() ?? -0.3
-                    let maxVal = w.max() ?? 0.3
-                    let range = max(0.1, maxVal - minVal)
+                medianBeatCanvas(mb: mb)
+                    .frame(height: 240)
+                    .background(Color.black.opacity(0.9))
+                    .cornerRadius(10)
 
-                    func pt(_ i: Int) -> CGPoint {
-                        let x = size.width * (CGFloat(i) / CGFloat(w.count - 1))
-                        let norm = CGFloat((w[i] - minVal) / range)
-                        return CGPoint(x: x, y: size.height * (1.0 - norm))
-                    }
-
-                    context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.06, green: 0.08, blue: 0.14)))
-
-                    // Isoelectric dotted line
-                    let isoNorm = CGFloat((mb.vIso - minVal) / range)
-                    let isoY = size.height * (1.0 - isoNorm)
-                    context.stroke(Path { p in
-                        p.move(to: CGPoint(x: 0, y: isoY))
-                        p.addLine(to: CGPoint(x: size.width, y: isoY))
-                    }, with: .color(Color.gray.opacity(0.5)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-
-                    // Shaded QT area
-                    let qX = pt(mb.qOnIndex).x
-                    let tEndPt = pt(mb.tEndIndex)
-                    let qtRect = CGRect(x: qX, y: 0, width: max(5, tEndPt.x - qX), height: size.height)
-                    context.fill(Path(qtRect), with: .color(Color.yellow.opacity(0.15)))
-
-                    // Waveform
-                    var path = Path()
-                    for i in 0..<w.count {
-                        let p = pt(i)
-                        if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
-                    }
-                    context.stroke(path, with: .color(.white), lineWidth: 3.0)
-
-                    // Tangent line on descending limb
-                    let k = mb.kSlopeIndex
-                    let m = mb.mSlope
-                    let x0 = max(0, k - 15)
-                    let x1 = min(w.count - 1, mb.tEndIndex + 10)
-                    let p0 = CGPoint(x: pt(x0).x, y: size.height * (1.0 - CGFloat((mb.vSlope + m * Double(x0 - k) - minVal) / range)))
-                    let p1 = CGPoint(x: pt(x1).x, y: size.height * (1.0 - CGFloat((mb.vSlope + m * Double(x1 - k) - minVal) / range)))
-                    context.stroke(Path { p in
-                        p.move(to: p0)
-                        p.addLine(to: p1)
-                    }, with: .color(.orange), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
-
-                    // Markers
-                    let marks: [(Int, Color, String)] = [
-                        (mb.qOnIndex, .blue, "Q"),
-                        (mb.tPeakIndex, .green, "T peak"),
-                        (mb.tEndIndex, .red, "T end")
-                    ]
-                    for (idx, color, _) in marks {
-                        let p = pt(idx)
-                        context.fill(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(color))
-                        context.stroke(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(.white), lineWidth: 1.5)
-                    }
-                }
-                .frame(height: 280)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                HStack(spacing: 16) {
-                    Label("Inizio Q", systemImage: "circle.fill").foregroundStyle(.blue)
-                    Label("Picco T", systemImage: "circle.fill").foregroundStyle(.green)
-                    Label("Fine T (Tangente)", systemImage: "circle.fill").foregroundStyle(.red)
-                }
-                .font(.caption2.bold())
+                // Multi-formula QTc table
+                multiFormulaCard(report: report)
+            } else {
+                Text("Battito mediano non disponibile.").font(.caption).foregroundColor(.secondary)
             }
         }
         .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
 
-    // MARK: - Beat Table
+    private func medianBeatCanvas(mb: MedianBeatData) -> some View {
+        Canvas { context, size in
+            let w = mb.wave
+            let n = w.count
+            guard n > 1 else { return }
 
-    private func beatTableView(report: ECGAnalysisReport) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Tabella Battito per Battito (\(report.beats.count) battiti)")
-                .font(.subheadline.bold())
+            let minV = (w.min() ?? -0.5) - 0.15
+            let maxV = (w.max() ?? 1.0) + 0.25
+            let span = max(0.5, maxV - minV)
 
-            ForEach(report.beats) { beat in
+            let dx = size.width / CGFloat(n)
+            func py(_ v: Double) -> CGFloat {
+                return size.height - CGFloat((v - minV) / span) * size.height
+            }
+
+            // Isoelectric baseline (Gray dot)
+            let basePy = py(mb.vIso)
+            var baseP = Path()
+            baseP.move(to: CGPoint(x: 0, y: basePy))
+            baseP.addLine(to: CGPoint(x: size.width, y: basePy))
+            context.stroke(baseP, with: .color(.gray.opacity(0.5)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+            // Tangent Line (Orange)
+            let k = mb.kSlopeIndex
+            let m = mb.mSlope
+            let v = mb.vSlope
+            let xs = [max(0, k - 18), min(n - 1, mb.tEndIndex + 12)]
+            var tanPath = Path()
+            for (idx, x) in xs.enumerated() {
+                let tangentV = v + m * Double(x - k)
+                let pt = CGPoint(x: CGFloat(x) * dx, y: py(tangentV))
+                if idx == 0 { tanPath.move(to: pt) } else { tanPath.addLine(to: pt) }
+            }
+            context.stroke(tanPath, with: .color(.orange), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+
+            // Waveform (White / Cyan)
+            var wPath = Path()
+            for i in 0..<n {
+                let pt = CGPoint(x: CGFloat(i) * dx, y: py(w[i]))
+                if i == 0 { wPath.move(to: pt) } else { wPath.addLine(to: pt) }
+            }
+            context.stroke(wPath, with: .color(.white), lineWidth: 2.2)
+
+            // Fiducial points
+            drawMarker(context: context, x: CGFloat(mb.qOnIndex) * dx, y: py(w[mb.qOnIndex]), color: .blue, label: "Q")
+            drawMarker(context: context, x: CGFloat(mb.tPeakIndex) * dx, y: py(w[mb.tPeakIndex]), color: .green, label: "T")
+            drawMarker(context: context, x: CGFloat(mb.tEndIndex) * dx, y: py(mb.vIso), color: .red, label: "Fine T")
+        }
+    }
+
+    private func drawMarker(context: GraphicsContext, x: CGFloat, y: CGFloat, color: Color, label: String) {
+        context.fill(Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)), with: .color(color))
+    }
+
+    private func multiFormulaCard(report: ECGAnalysisReport) -> some View {
+        guard let qt = report.qtSummary else { return AnyView(EmptyView()) }
+        return AnyView(
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Confronto Formule di Correzione QTc (Linee Guida AHA/ACCF):")
+                    .font(.caption.bold())
+                    .foregroundColor(.secondary)
+
                 HStack {
-                    Text("#\(beat.beatNumber)")
-                        .font(.caption.bold())
-                    Spacer()
-                    Text("Tempo: \(String(format: "%.1f s", beat.rTimeSec))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("RR: \(String(format: "%.0f ms", beat.rrMs))")
-                        .font(.caption2)
-                    Spacer()
-                    Text("QT: \(String(format: "%.0f ms", beat.qtMs))")
-                        .font(.caption.bold())
-                    Spacer()
-                    Text("QTcF: \(String(format: "%.0f", beat.qtcFridericia))")
-                        .font(.caption.bold())
-                        .foregroundStyle(.blue)
+                    formulaTile(name: "Fridericia (Raccom.)", value: "\(Int(round(qt.qtcFridericia))) ms", highlight: true)
+                    formulaTile(name: "Bazett", value: "\(Int(round(qt.qtcBazett))) ms", highlight: false)
                 }
-                .padding(.vertical, 3)
-                Divider()
+                HStack {
+                    formulaTile(name: "Framingham", value: "\(Int(round(qt.qtcFramingham))) ms", highlight: false)
+                    formulaTile(name: "Hodges", value: "\(Int(round(qt.qtcHodges))) ms", highlight: false)
+                }
             }
-        }
-        .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        )
     }
 
-    // MARK: - Lorenz Plot
+    private func formulaTile(name: String, value: String, highlight: Bool) -> some View {
+        HStack {
+            Text(name).font(.caption2).foregroundColor(highlight ? .cyan : .secondary)
+            Spacer()
+            Text(value).font(.caption.bold()).foregroundColor(highlight ? .cyan : .primary)
+        }
+        .padding(8)
+        .background(Color(.tertiarySystemBackground))
+        .cornerRadius(6)
+    }
 
-    private func lorenzPlotView(report: ECGAnalysisReport) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Grafico di Lorenz (Poincaré: RR_n vs RR_n+1)")
-                .font(.subheadline.bold())
+    // MARK: - Tab 5: 3D Vectorcardiography / Attractor Loop
 
-            Canvas { context, size in
-                let rr = report.rrIntervalsMs
-                guard rr.count > 2 else { return }
-                let minRR = max(300.0, (rr.min() ?? 500.0) - 100.0)
-                let maxRR = min(1500.0, (rr.max() ?? 1000.0) + 100.0)
-                let span = max(100.0, maxRR - minRR)
-
-                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.05, green: 0.07, blue: 0.12)))
-
-                // Diagonal y = x line
-                context.stroke(Path { p in
-                    p.move(to: CGPoint(x: 0, y: size.height))
-                    p.addLine(to: CGPoint(x: size.width, y: 0))
-                }, with: .color(Color.red.opacity(0.5)), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-
-                for i in 0..<(rr.count - 1) {
-                    let xNorm = CGFloat((rr[i] - minRR) / span)
-                    let yNorm = CGFloat((rr[i + 1] - minRR) / span)
-                    let x = size.width * xNorm
-                    let y = size.height * (1.0 - yNorm)
-                    context.fill(Path(ellipseIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)), with: .color(.cyan))
+    private func vcg3DView(report: ECGAnalysisReport) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(report.vcgData.isMultiChannel ? "Vectorcardiogramma 3D Reale (3 Derivazioni)" : "Attrattore Spazio delle Fasi 3D (Takens)")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    vcgYaw = 35.0
+                    vcgPitch = -25.0
+                    vcgScale = 1.0
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.caption)
                 }
             }
-            .frame(height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            Text("I punti allineati lungo la diagonale y = x indicano ritmo sinusale fisiologico regolare.")
+            // Interactive 3D Canvas
+            vcgCanvas(report: report)
+                .frame(height: 280)
+                .background(Color.black.opacity(0.92))
+                .cornerRadius(12)
+                .gesture(
+                    DragGesture()
+                        .onChanged { val in
+                            vcgYaw += Double(val.translation.width) * 0.04
+                            vcgPitch += Double(val.translation.height) * 0.04
+                        }
+                )
+
+            HStack {
+                Text("Trascina per ruotare in 3D · Scala:").font(.caption2).foregroundColor(.secondary)
+                Slider(value: $vcgScale, in: 0.5...2.5)
+            }
+
+            Text("💡 La visualizzazione 3D dello spazio delle fasi rivela la morfologia ad anello (loop) della depolarizzazione ventricolare (QRS) e ripolarizzazione (T).")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundColor(.secondary)
         }
         .padding()
-        .background(Color.gray.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+    }
+
+    private func vcgCanvas(report: ECGAnalysisReport) -> some View {
+        Canvas { context, size in
+            let points = report.vcgData.points
+            guard points.count > 10 else { return }
+
+            let cx = size.width / 2.0
+            let cy = size.height / 2.0
+
+            let yawRad = vcgYaw * .pi / 180.0
+            let pitchRad = vcgPitch * .pi / 180.0
+
+            let cosY = cos(yawRad), sinY = sin(yawRad)
+            let cosP = cos(pitchRad), sinP = sin(pitchRad)
+
+            var projected: [(p: CGPoint, z: Double)] = []
+
+            for pt in points {
+                // Scale factor
+                let sx = pt.x * 90.0 * vcgScale
+                let sy = pt.y * 90.0 * vcgScale
+                let sz = pt.z * 90.0 * vcgScale
+
+                // 3D rotation
+                let x1 = sx * cosY + sz * sinY
+                let z1 = -sx * sinY + sz * cosY
+
+                let y2 = sy * cosP - z1 * sinP
+                let z2 = sy * sinP + z1 * cosP
+
+                // Perspective projection
+                let dist = 400.0
+                let factor = dist / (dist + z2)
+                let px = cx + CGFloat(x1 * factor)
+                let py = cy - CGFloat(y2 * factor)
+
+                projected.append((CGPoint(x: px, y: py), z2))
+            }
+
+            // Draw connecting lines with depth color
+            var path = Path()
+            for (idx, item) in projected.enumerated() {
+                if idx == 0 { path.move(to: item.p) } else { path.addLine(to: item.p) }
+            }
+            context.stroke(path, with: .color(.cyan.opacity(0.85)), lineWidth: 1.5)
+
+            // Draw glowing points along trajectory
+            for item in projected {
+                let alpha = max(0.2, min(1.0, (item.z + 150.0) / 300.0))
+                context.fill(Path(ellipseIn: CGRect(x: item.p.x - 2, y: item.p.y - 2, width: 4, height: 4)), with: .color(.cyan.opacity(alpha)))
+            }
+        }
     }
 
     // MARK: - PDF Export Section
 
     private func pdfExportSection(report: ECGAnalysisReport) -> some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Button {
-                #if canImport(UIKit)
-                if let url = PDFReportGenerator.generatePDF(for: report, gender: selectedGender, userNotes: userNotes) {
-                    self.generatedPDFURL = url
-                    self.isSharingPDF = true
-                }
-                #endif
+                generatePDF(report: report)
             } label: {
                 HStack {
-                    Image(systemName: "doc.richtext.fill")
-                    Text("Esporta Referto Medico PDF A4")
+                    Image(systemName: "doc.text.fill")
+                    Text("Esporta Referto Medico PDF Completo (A4)")
                         .bold()
                 }
                 .frame(maxWidth: .infinity)
                 .padding()
-                .background(Color.blue)
-                .foregroundColor(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .background(Color.cyan)
+                .foregroundColor(.black)
+                .cornerRadius(10)
             }
 
-            if let url = generatedPDFURL {
-                ShareLink(item: url) {
-                    Label("Invia Referto (Condividi / Salva)", systemImage: "square.and.arrow.up")
-                        .font(.footnote.bold())
+            if generatedPDFURL != nil {
+                Button {
+                    isSharingPDF = true
+                } label: {
+                    HStack {
+                        Image(systemName: "square.and.arrow.up")
+                        Text("Condividi o Salva Referto PDF")
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Empty State View
+
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 60))
+                .foregroundColor(.cyan)
+            Text("Benvenuto in Dynamic ECG Pro")
+                .font(.title2.bold())
+            Text("Importa un file CSV esportato da Apple Watch o seleziona un caso clinico di riferimento per avviare l'analisi completa.")
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+
+            Button("Carica Ritmo Sinusale Esempio") {
+                loadClinicalSample(PreloadedSamples.allSamples[0])
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.cyan)
+        }
+        .padding(30)
+    }
+
+    // MARK: - Sheets
+
+    private var notesSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Note del Paziente o del Medico") {
+                    TextEditor(text: $userNotes)
+                        .frame(minHeight: 120)
+                }
+            }
+            .navigationTitle("Note Cliniche")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Chiudi") { isNotesSheetPresented = false }
                 }
             }
         }
     }
 
-    // MARK: - Sheets
-
-    private var notesInputSheet: some View {
+    private var archiveSheet: some View {
         NavigationStack {
-            Form {
-                Section("Sintomi o Note Cliniche") {
-                    TextField("Es. Palpitazioni a riposo, dopo caffè...", text: $userNotes, axis: .vertical)
-                        .lineLimit(4...8)
+            List {
+                Section("Casi Clinici di Riferimento Precaricati") {
+                    ForEach(PreloadedSamples.allSamples, id: \.id) { sample in
+                        Button {
+                            loadClinicalSample(sample)
+                            isArchiveSheetPresented = false
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sample.title).font(.subheadline.bold())
+                                Text(sample.subtitle).font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
                 }
 
-                Section("Genere del Paziente") {
+                Section("Registrazioni Importate in Memoria") {
+                    let saved = StorageManager.shared.listSavedRecordings()
+                    if saved.isEmpty {
+                        Text("Nessuna registrazione salvata in archivio.").font(.caption).foregroundColor(.secondary)
+                    } else {
+                        ForEach(saved) { item in
+                            Button {
+                                if let str = StorageManager.shared.readCSVContent(fileName: item.fileName) {
+                                    analyzeContent(str, name: item.displayName)
+                                    isArchiveSheetPresented = false
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.displayName).font(.subheadline.bold())
+                                    Text("\(item.dateStr) · \(Int(item.bpm)) bpm · QTc \(Int(item.qtcFridericia)) ms")
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .onDelete { indexSet in
+                            for idx in indexSet {
+                                StorageManager.shared.deleteRecording(item: saved[idx])
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Archivio & Registrazioni")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Chiudi") { isArchiveSheetPresented = false }
+                }
+            }
+        }
+    }
+
+    private var settingsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Sesso Biologico (Soglie AHA/ACCF)") {
                     Picker("Genere", selection: $selectedGender) {
                         ForEach(Gender.allCases) { g in
                             Text(g.rawValue).tag(g)
@@ -676,108 +1156,88 @@ struct ContentView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+
+                Section("Calibrazione Striscia ECG") {
+                    Picker("Velocità Carta", selection: $speedScale) {
+                        Text("25 mm/s (Standard)").tag(1.0)
+                        Text("50 mm/s (Espansa)").tag(2.0)
+                    }
+                    Picker("Guadagno Voltaggio", selection: $voltageScale) {
+                        Text("10 mm/mV (Standard)").tag(1.0)
+                        Text("20 mm/mV (Raddoppiato)").tag(2.0)
+                    }
+                }
             }
-            .navigationTitle("Dettagli Paziente")
+            .navigationTitle("Parametri & Calibrazione")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Fatto") {
-                        isNotesSheetPresented = false
-                    }
+                    Button("Salva") { isSettingsSheetPresented = false }
                 }
             }
         }
     }
 
-    private var emptyStateView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 48))
-                .foregroundStyle(.blue)
-            Text("Nessun tracciato caricato")
-                .font(.headline)
-            Text("Seleziona 'Apri CSV da File' nel menu in alto a destra per analizzare un ECG esportato dall'app Salute.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(40)
-    }
-
-    // MARK: - Import & Processing
+    // MARK: - Actions & Engine Helpers
 
     private func handleFileImport(result: Result<[URL], Error>) {
-        do {
-            guard let selectedFile = try result.get().first else { return }
-            guard selectedFile.startAccessingSecurityScopedResource() else { return }
-            defer { selectedFile.stopAccessingSecurityScopedResource() }
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        guard url.startAccessingSecurityScopedResource() else { return }
+        defer { url.stopAccessingSecurityScopedResource() }
 
-            let content = try String(contentsOf: selectedFile, encoding: .utf8)
-            let (meta, samples, fs) = ECGParser.parseCSV(content: content)
-            processSignal(samples: samples, fs: fs, metadata: meta, name: selectedFile.lastPathComponent)
-        } catch {
-            print("Errore caricamento: \(error)")
+        if let data = try? Data(contentsOf: url), let content = String(data: data, encoding: .utf8) {
+            analyzeContent(content, name: url.deletingPathExtension().lastPathComponent)
         }
     }
 
-    private func processSignal(samples: [Double], fs: Double, metadata: ECGMetadata, name: String) {
-        guard samples.count > 100 else { return }
-        let duration = Double(samples.count) / fs
+    private func loadClinicalSample(_ sample: ClinicalSample) {
+        let (content, dName) = PreloadedSamples.loadSample(sample: sample)
+        analyzeContent(content, name: dName)
+    }
 
-        let baselineFree = ECGProcessor.removeBaselineWander(signal: samples, fs: fs)
-        let rPeaks = ECGProcessor.detectRPeaks(signal: baselineFree, fs: fs)
-        let pPeaks = ECGProcessor.detectPWaves(signal: baselineFree, rPeaks: rPeaks, fs: fs)
-
-        var rrIntervals: [Double] = []
-        if rPeaks.count > 1 {
-            for i in 0..<(rPeaks.count - 1) {
-                rrIntervals.append((Double(rPeaks[i + 1] - rPeaks[i]) / fs) * 1000.0)
-            }
-        }
-
-        let bpm = duration > 0 ? (Double(rPeaks.count) / duration) * 60.0 : 0.0
-        let hrv = ECGProcessor.calculateHRV(rrMs: rrIntervals)
-        let (summary, medBeat, beats) = ECGProcessor.analyzeQT(signal: baselineFree, rPeaks: rPeaks, fs: fs)
-
-        self.fileName = name
-        self.report = ECGAnalysisReport(
-            metadata: metadata,
+    private func analyzeContent(_ content: String, name: String) {
+        let (meta, multi, fs) = ECGParser.parseCSV(content: content)
+        let rep = ECGProcessor.analyze(
+            multiLead: multi,
+            metadata: meta,
             fs: fs,
-            durationSec: duration,
-            rawSignal: samples,
-            filteredSignal: baselineFree,
-            rPeakIndices: rPeaks,
-            pPeakIndices: pPeaks,
-            bpm: bpm,
-            hrv: hrv,
-            rrIntervalsMs: rrIntervals,
-            qtSummary: summary,
-            medianBeat: medBeat,
-            beats: beats,
+            selectedLead: .lead1,
             userNotes: userNotes
         )
+        self.fileName = name
+        self.report = rep
         self.generatedPDFURL = nil
+
+        // Save to local documents storage
+        _ = StorageManager.shared.saveCSV(content: content, originalFileName: name, report: rep)
     }
 
-    private func loadSample(named: String, hr: Double, qt: Double) {
-        let fs = 512.0
-        let n = Int(30.0 * fs)
-        var synthetic = [Double](repeating: 0.0, count: n)
-        let rrSamples = Int((60.0 / hr) * fs)
+    private func switchLead(to newLead: LeadSelection) {
+        guard let current = report else { return }
+        let updated = ECGProcessor.analyze(
+            multiLead: current.multiLead,
+            metadata: current.metadata,
+            fs: current.fs,
+            selectedLead: newLead,
+            userNotes: userNotes
+        )
+        self.report = updated
+    }
 
-        for r in stride(from: Int(0.4 * fs), to: n - Int(0.5 * fs), by: rrSamples) {
-            synthetic[r] = 0.85
-            if r - Int(0.03 * fs) >= 0 { synthetic[r - Int(0.03 * fs)] = -0.15 }
-            if r + Int(0.04 * fs) < n { synthetic[r + Int(0.04 * fs)] = -0.25 }
-            let tPeak = r + Int((qt * 0.65 / 1000.0) * fs)
-            if tPeak < n { synthetic[tPeak] = 0.22 }
-            let pPeak = r - Int(0.16 * fs)
-            if pPeak >= 0 { synthetic[pPeak] = 0.08 }
+    private func generatePDF(report: ECGAnalysisReport) {
+        if let url = PDFReportGenerator.generatePDF(for: report, gender: selectedGender, userNotes: userNotes) {
+            self.generatedPDFURL = url
+            self.isSharingPDF = true
         }
-
-        var meta = ECGMetadata()
-        meta.recordedDate = "Tracciato Esempio"
-        meta.classification = hr > 100 ? "Frequenza cardiaca elevata" : "Ritmo sinusale"
-        meta.device = "Apple Watch Series"
-        processSignal(samples: synthetic, fs: fs, metadata: meta, name: "\(named) (\(Int(hr)) bpm)")
     }
+}
+
+// MARK: - ShareSheet Helper
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
